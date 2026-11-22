@@ -10,7 +10,7 @@
     "url": "https://github.com/anikom15/libretro-slang-vscode.git"
   },
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^4.1.0"
   },
   "categories": [
     "Programming Languages"
