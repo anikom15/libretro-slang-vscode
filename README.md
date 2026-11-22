@@ -12,6 +12,8 @@ VS Code language support for Libretro `.slang` shaders and `.slangp` presets.
 - Parameter declaration and duplicate declaration diagnostics within an expanded shader
 - Nested include and framebuffer-format diagnostics, including missing files and include cycles
 - Parameter hover and Go to Definition across included files
+- Macro hover with signatures and documentation from adjacent or inline comments, including definitions in included files
+- Preprocessor-aware include expansion with `#define`, `#ifdef`, `#if`, `#elif`, `#else`, and `#endif`; `#undef` and `#ifndef` are reported as unsupported by the RetroArch preprocessor
 - Hover documentation from contiguous comments above a definition or an inline comment after it
 - Go to Definition for recognized functions, uniform-block members, and stage interface declarations
 - Warnings for recognized uniform type mismatches and vertex/fragment interface type mismatches at matching locations

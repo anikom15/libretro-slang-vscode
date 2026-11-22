@@ -60,7 +60,8 @@ const FORMATS = [
 const BUILTIN_UNIFORMS = [
   "MVP", "SourceSize", "OutputSize", "FinalViewportSize", "OriginalSize",
   "FrameCount", "FrameDirection", "Rotation", "OriginalAspect",
-  "OriginalAspectRotated", "OriginalFPS", "FrameTimeDelta"
+  "OriginalAspectRotated", "OriginalFPS", "FrameTimeDelta",
+  "EnableHDR", "CurrentSubFrame", "TotalSubFrames"
 ];
 
 const BUILTIN_DESCRIPTIONS = {
@@ -205,6 +206,11 @@ async function validateSlang(document, model) {
         diagnostics.push(diagnostic(document, line, `"${format}" is not a supported .slang framebuffer format.`));
       }
     }
+    if (/^\s*#\s*(?:undef|ifndef)\b/i.test(text)) {
+      const directive = text.match(/^\s*#\s*(undef|ifndef)\b/i)[1];
+      diagnostics.push(diagnostic(document, line,
+        `The RA preprocessor does not support #${directive.toLowerCase()}.`, vscode.DiagnosticSeverity.Warning));
+    }
 
     if (/^\s*#\s*pragma\s+parameter\b/i.test(text) &&
         !model.parameters.some(parameter => parameter.uri.toString() === entry.uri.toString() &&
@@ -296,9 +302,23 @@ async function validatePreset(document) {
     try {
       const bytes = await vscode.workspace.fs.readFile(resolved);
       const text = Buffer.from(bytes).toString("utf8");
-      for (const match of text.matchAll(/^\s*#\s*pragma\s+parameter\s+([A-Za-z_]\w*)\b/gm)) {
-        declaredParameters.add(match[1]);
-      }
+      const open = vscode.workspace.textDocuments.find(item => item.uri.toString() === resolved.toString());
+      const source = open ? open.getText() : text;
+      const model = await buildIncludeModel(
+        { uri: resolved, text: source },
+        resolveInclude,
+        async uri => {
+          const includedOpen = vscode.workspace.textDocuments.find(item => item.uri.toString() === uri.toString());
+          if (includedOpen) return { uri, text: includedOpen.getText() };
+          try {
+            const includedBytes = await vscode.workspace.fs.readFile(uri);
+            return { uri, text: Buffer.from(includedBytes).toString("utf8") };
+          } catch {
+            return null;
+          }
+        }
+      );
+      for (const parameter of model.parameters) declaredParameters.add(parameter.name);
     } catch {}
   }
 
@@ -516,7 +536,7 @@ function activate(context) {
       const model = await shaderModel(document);
       const semantic = buildSemanticModel(model);
       const resolved = resolveAt(model, semantic, document.uri, range.start.line, range.start.character, word);
-      const definitions = [...resolved.parameters, ...resolved.symbols].filter(item =>
+      const definitions = [...resolved.parameters, ...resolved.symbols, ...(resolved.defines || [])].filter(item =>
         item.uri.toString() !== document.uri.toString() || item.line !== range.start.line ||
         item.character !== range.start.character);
       return [...new Map(definitions.map(item => [
@@ -535,7 +555,9 @@ function activate(context) {
       const model = await shaderModel(document);
       if (cancellationToken.isCancellationRequested) return null;
       const semantic = buildSemanticModel(model);
-      const names = new Set([...semantic.symbols.map(symbol => symbol.name), ...model.parameters.map(parameter => parameter.name)]);
+      const names = new Set([...semantic.symbols.map(symbol => symbol.name),
+        ...model.parameters.map(parameter => parameter.name),
+        ...(model.defines || []).map(define => define.name)]);
       const aliases = new Set();
       for (const alias of model.aliases) {
         for (const suffix of ["", "Size", "Feedback", "FeedbackSize"]) aliases.add(alias.name + suffix);
@@ -551,10 +573,13 @@ function activate(context) {
       for (const alias of model.aliases) {
         if (alias.uri.toString() === document.uri.toString()) add(alias.line, alias.character, alias.name, 3, true);
       }
+      for (const define of model.defines || []) {
+        if (define.uri.toString() === document.uri.toString()) add(define.line, define.character, define.name, 3, true);
+      }
       for (const token of semantic.tokens) {
         if (cancellationToken.isCancellationRequested) return null;
         if (token.entry.uri.toString() !== document.uri.toString()) continue;
-        const builtin = builtinType(token.value) ||
+        const builtin = builtinType(token.value, model, semantic) ||
           /^(Original|Source|OriginalHistory\d+|PassOutput\d+|PassFeedback\d+|User\d+|UserSize\d+)$/.test(token.value);
         if (!names.has(token.value)) {
           if (aliases.has(token.value)) add(token.entry.line, token.character, token.value, 3, false);
@@ -565,8 +590,8 @@ function activate(context) {
         const symbol = resolved.symbols.find(item => item.uri.toString() === document.uri.toString() &&
           item.line === token.entry.line && item.character === token.character);
         const candidate = symbol || resolved.symbols[0];
-        if (!candidate && !resolved.parameters.length) continue;
-        const type = resolved.parameters.length || candidate.kind === "functionParameter" ? 0 :
+        if (!candidate && !resolved.parameters.length && !resolved.defines?.length) continue;
+        const type = resolved.parameters.length || resolved.defines?.length || candidate?.kind === "functionParameter" ? 0 :
           candidate.kind === "struct" ? 4 : candidate.kind === "function" ? 1 :
           candidate.kind === "uniformMember" ? 2 : 3;
         add(token.entry.line, token.character, token.value, type, Boolean(symbol));
@@ -588,14 +613,23 @@ function activate(context) {
       const semantic = buildSemanticModel(model);
       const resolved = resolveAt(model, semantic, document.uri, range.start.line, range.start.character, word);
       const declaration = resolved.parameters[0];
+      const define = (resolved.defines || []).find(item => item.name === word);
       const markdown = new vscode.MarkdownString();
       if (declaration) {
         markdown.appendMarkdown(`**Libretro parameter** \`${declaration.name}\`\n\n`);
         markdown.appendText(declaration.description);
         markdown.appendMarkdown("\n\n");
         markdown.appendText(declaration.values);
+      } else if (define) {
+        markdown.appendMarkdown(`**Preprocessor define** \`${define.name}\`\n\n`);
+        markdown.appendCodeblock(`#define ${define.name}${define.parameters ? `(${define.parameters.join(", ")})` : ""} ${define.replacement}`.trim(), "c");
+        if (define.documentation) {
+          markdown.appendMarkdown("\n\n");
+          markdown.appendText(define.documentation);
+        }
       } else {
-        const expected = !resolved.symbols.some(symbol => symbol.kind === "local" || symbol.kind === "functionParameter") && builtinType(word);
+        const expected = !resolved.symbols.some(symbol => symbol.kind === "local" || symbol.kind === "functionParameter") &&
+          builtinType(word, model, semantic);
         if (expected) markdown.appendMarkdown(`Libretro built-in uniform: \`${expected} ${word}\``);
         else if (!resolved.symbols.length) {
           const index = semantic.tokens.findIndex(token =>

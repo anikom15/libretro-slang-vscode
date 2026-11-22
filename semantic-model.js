@@ -21,7 +21,8 @@ const BUILTIN_TYPES = {
   MVP: "mat4", OutputSize: "vec4", FinalViewportSize: "vec4",
   FrameCount: "uint", FrameDirection: "int", Rotation: "uint",
   OriginalAspect: "float", OriginalAspectRotated: "float",
-  OriginalFPS: "float", FrameTimeDelta: "uint"
+  OriginalFPS: "float", FrameTimeDelta: "uint",
+  EnableHDR: "bool", CurrentSubFrame: "uint", TotalSubFrames: "uint"
 };
 const QUALIFIERS = new Set([
   "const", "in", "out", "inout", "uniform", "flat", "smooth", "noperspective",
@@ -34,10 +35,32 @@ const BASIC_TYPES = /^(?:bool|int|uint|float|double|[biud]?vec[234]|d?mat[234](?
  * @param {string} name Uniform name.
  * @returns {string|null} GLSL type, or null for an unrecognized name.
  */
-function builtinType(name) {
+function builtinType(name, model = null, semantic = null) {
   if (Object.prototype.hasOwnProperty.call(BUILTIN_TYPES, name)) return BUILTIN_TYPES[name];
   if (/^(OriginalSize|SourceSize|OriginalHistorySize\d+|PassOutputSize\d+|PassFeedbackSize\d+)$/.test(name)) return "vec4";
-  return null;
+  if (/^(Original|Source|OriginalHistory\d+|PassOutput\d+|PassFeedback\d+|User\d+)$/.test(name)) return "sampler2D";
+  if (/^UserSize\d+$/.test(name)) return "vec4";
+
+  const feedbackSize = /^(.*)FeedbackSize$/.exec(name);
+  const size = /^(.*)Size$/.exec(name);
+  const feedback = /^(.*)Feedback$/.exec(name);
+  let base = feedbackSize ? feedbackSize[1] : size ? size[1] : feedback ? feedback[1] : null;
+  if (!base) return null;
+
+  const samplerNames = new Set();
+  if (semantic) {
+    for (const symbol of semantic.symbols) {
+      if ((symbol.kind === "variable" || symbol.kind === "uniformMember") && symbol.type === "sampler2D") {
+        samplerNames.add(symbol.name);
+      }
+    }
+  }
+  if (model) {
+    for (const alias of model.aliases || []) samplerNames.add(alias.name);
+  }
+  if (!samplerNames.has(base)) return null;
+  if (feedbackSize || size) return "vec4";
+  return "sampler2D";
 }
 
 /**
@@ -96,7 +119,7 @@ function locationOf(token) {
  * Parse a declaration into symbols with source locations and qualifiers.
  * This recognizes common declarations, not the complete GLSL grammar.
  */
-function declarations(tokens, kind, extra = {}, terminator) {
+function declarations(tokens, kind, extra = {}, terminator, macroTypes = new Map()) {
   let i = 0;
   let location = null;
   const qualifiers = [];
@@ -118,7 +141,8 @@ function declarations(tokens, kind, extra = {}, terminator) {
     }
   }
   if (!tokens[i] || !/^[A-Za-z_]\w*$/.test(tokens[i].value)) return [];
-  const type = tokens[i++].value;
+  let type = tokens[i++].value;
+  if (macroTypes.has(type) && BASIC_TYPES.test(macroTypes.get(type))) type = macroTypes.get(type);
   const result = [];
   for (const part of splitComma(tokens.slice(i))) {
     const name = part[0];
@@ -150,6 +174,11 @@ function buildSemanticModel(model) {
   const tokens = tokensFor(model);
   const symbols = [];
   const structNames = new Set();
+  const macroTypes = new Map();
+  for (const define of model.defines || []) {
+    const first = define.replacement.trim().match(/^([A-Za-z_]\w*)/);
+    if (first) macroTypes.set(define.name, first[1]);
+  }
   for (let i = 0; i + 2 < tokens.length; i++) {
     if (tokens[i].value === "struct" && /^[A-Za-z_]\w*$/.test(tokens[i + 1].value) &&
         tokens[i + 2].value === "{") {
@@ -179,7 +208,7 @@ function buildSemanticModel(model) {
       } else if (value === ";") {
         const prefix = tokens.slice(statement, j);
         const found = declarations(prefix, "local", { scopeStart: scopes[scopes.length - 1].start,
-          scopeEnd: scopes[scopes.length - 1].end }, tokens[j]);
+          scopeEnd: scopes[scopes.length - 1].end }, tokens[j], macroTypes);
         for (const symbol of found) {
           if (BASIC_TYPES.test(symbol.type) || structNames.has(symbol.type)) {
             symbol.declarationIndex = statement + prefix.findIndex(token =>
@@ -248,7 +277,7 @@ function buildSemanticModel(model) {
       let memberStart = i + 1;
       for (let j = memberStart; j < end; j++) {
         if (tokens[j].value === ";") {
-          symbols.push(...declarations(tokens.slice(memberStart, j), "uniformMember", { instance }, tokens[j]));
+          symbols.push(...declarations(tokens.slice(memberStart, j), "uniformMember", { instance }, tokens[j], macroTypes));
           memberStart = j + 1;
         }
       }
@@ -257,7 +286,7 @@ function buildSemanticModel(model) {
       if (tokens[i + 1]) i++;
       consumedBlock = true;
     } else if (value === ";") {
-      symbols.push(...declarations(prefix, "variable", {}, tokens[i]));
+      symbols.push(...declarations(prefix, "variable", {}, tokens[i], macroTypes));
     }
     if (value === "{" && !consumedBlock) {
       const end = matching(tokens, i, "{", "}");
@@ -422,11 +451,15 @@ function resolveAt(model, semantic, uri, line, character, name) {
   const indexes = semantic.tokenIndexes.get(`${uri.toString()}:${line}:${character}:${name}`) || [];
   const namedSymbols = semantic.symbolsByName.get(name) || [];
   const parameters = model.parameters.filter(parameter => parameter.name === name);
+  const defines = (model.defines || []).filter(define => define.name === name);
   if (!indexes.length) {
     const isParameter = parameters.some(parameter => parameter.uri.toString() === uri.toString() &&
       parameter.line === line && parameter.character === character);
+    const isDefine = defines.some(define => define.uri.toString() === uri.toString() &&
+      define.line === line && define.character === character);
     return {
       parameters: isParameter ? parameters : [],
+      defines: isDefine ? defines : [],
       symbols: isParameter ? namedSymbols.filter(symbol =>
         symbol.kind === "uniformMember" && symbol.name === name) : []
     };
@@ -484,7 +517,8 @@ function resolveAt(model, semantic, uri, line, character, name) {
   const isCall = indexes.some(index => tokens[index + 1] && tokens[index + 1].value === "(");
   const isMember = indexes.some(index => tokens[index - 1] && tokens[index - 1].value === ".");
   const matchedMember = [...unique.values()].some(symbol => symbol.kind === "uniformMember");
-  return { parameters: isCall || localMatch || (isMember && !matchedMember) ? [] : parameters, symbols: [...unique.values()] };
+  return { parameters: isCall || localMatch || (isMember && !matchedMember) ? [] : parameters,
+    defines: localMatch ? [] : defines, symbols: [...unique.values()] };
 }
 
 /**
@@ -497,7 +531,7 @@ function semanticIssues(model, semantic) {
   const parameterNames = new Set(model.parameters.map(parameter => parameter.name));
   for (const symbol of semantic.symbols) {
     if (symbol.kind !== "uniformMember" || symbol.conditional || symbol.array) continue;
-    const expected = builtinType(symbol.name) || (parameterNames.has(symbol.name) ? "float" : null);
+    const expected = builtinType(symbol.name, model, semantic) || (parameterNames.has(symbol.name) ? "float" : null);
     if (expected && symbol.type !== expected &&
         /^(bool|int|uint|float|double|[biud]?vec[234]|d?mat[234](?:x[234])?)$/.test(symbol.type)) {
       issues.push({ ...symbol, message: `Uniform "${symbol.name}" must have type ${expected}, not ${symbol.type}.` });

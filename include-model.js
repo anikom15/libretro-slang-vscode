@@ -123,6 +123,119 @@ function includeAtLine(text) {
 }
 
 /**
+ * Evaluate the limited expressions used by RetroArch-style shader preprocessor
+ * directives. Unknown names and unsupported constructs evaluate conservatively
+ * to false; arithmetic and boolean operators are recognized.
+ * @param {string} expression Preprocessor expression.
+ * @param {Set<string>} definitions Currently active macro names.
+ * @param {Map<string, {replacement: string}>} defines Macro definitions.
+ * @returns {boolean|number}
+ */
+function evaluatePreprocessor(expression, definitions, defines) {
+  let source = expression.replace(/\bdefined\s*\(\s*([A-Za-z_]\w*)\s*\)/g, (_, name) => definitions.has(name) ? "1" : "0");
+  source = source.replace(/\bdefined\s+([A-Za-z_]\w*)\b/g, (_, name) => definitions.has(name) ? "1" : "0");
+  source = source.replace(/[A-Za-z_]\w*/g, name => {
+    if (name === "true") return "1";
+    if (name === "false") return "0";
+    if (!definitions.has(name)) return "0";
+    const replacement = defines.get(name)?.replacement.trim();
+    return /^[-+]?(?:0[xX][0-9A-Fa-f]+|\d+(?:\.\d+)?)$/.test(replacement || "") ? replacement : "1";
+  });
+  const tokens = source.match(/(?:0[xX][0-9A-Fa-f]+|\d+(?:\.\d*)?|\.\d+|&&|\|\||==|!=|<=|>=|[()+\-*!/%<>&|])/g) || [];
+  let index = 0;
+  const peek = () => tokens[index];
+  const take = () => tokens[index++];
+  function number() {
+    const value = take();
+    if (!value) return 0;
+    if (/^0[xX]/.test(value)) return parseInt(value, 16);
+    return Number(value);
+  }
+  function primary() {
+    if (peek() === "(") {
+      take();
+      const value = ternary();
+      if (peek() === ")") take();
+      return value;
+    }
+    if (peek() === "!") {
+      take();
+      return primary() ? 0 : 1;
+    }
+    if (peek() === "+" || peek() === "-") {
+      const operator = take();
+      const value = primary();
+      return operator === "-" ? -value : value;
+    }
+    return number();
+  }
+  function multiplicative() {
+    let value = primary();
+    while (peek() === "*" || peek() === "/" || peek() === "%") {
+      const operator = take();
+      const right = primary();
+      value = operator === "*" ? value * right : operator === "/" ? value / right : value % right;
+    }
+    return value;
+  }
+  function additive() {
+    let value = multiplicative();
+    while (peek() === "+" || peek() === "-") {
+      const operator = take();
+      const right = multiplicative();
+      value = operator === "+" ? value + right : value - right;
+    }
+    return value;
+  }
+  function relational() {
+    let value = additive();
+    while (["<", "<=", ">", ">="].includes(peek())) {
+      const operator = take();
+      const right = additive();
+      if (operator === "<") value = value < right ? 1 : 0;
+      else if (operator === "<=") value = value <= right ? 1 : 0;
+      else if (operator === ">") value = value > right ? 1 : 0;
+      else value = value >= right ? 1 : 0;
+    }
+    return value;
+  }
+  function equality() {
+    let value = relational();
+    while (peek() === "==" || peek() === "!=") {
+      const operator = take();
+      const right = relational();
+      value = operator === "==" ? (value === right ? 1 : 0) : (value !== right ? 1 : 0);
+    }
+    return value;
+  }
+  function logicalAnd() {
+    let value = equality();
+    while (peek() === "&&") {
+      take();
+      const right = equality();
+      value = value && right ? 1 : 0;
+    }
+    return value;
+  }
+  function logicalOr() {
+    let value = logicalAnd();
+    while (peek() === "||") {
+      take();
+      const right = logicalAnd();
+      value = value || right ? 1 : 0;
+    }
+    return value;
+  }
+  function ternary() {
+    let value = logicalOr();
+    // The RA preprocessor commonly uses integers and short-circuitable boolean
+    // expressions; ternary expressions are intentionally not admitted here.
+    return value;
+  }
+  return ternary();
+}
+
+/**
  * Expand includes in source order and collect stages, parameters and aliases.
  * The resolver maps an including URI and path to a URI; read returns a source
  * object or null for a missing file. Each expanded entry retains its own URI and
@@ -139,17 +252,91 @@ async function buildIncludeModel(root, resolve, read) {
   const issues = [];
   const dependencies = new Set();
   const active = new Set();
+  const defines = new Map();
   let missingOptional = false;
+  const frames = [];
+  const preprocessorActive = () => frames.every(frame => frame.active);
+  const preprocessorUncertain = () => frames.some(frame => frame.uncertain);
 
   async function visit(source, rootLine) {
     const key = source.uri.toString();
     active.add(key);
     const lines = sourceLines(source.text);
+    const baseDepth = frames.length;
     for (let line = 0; line < lines.length; line++) {
       const location = { uri: source.uri, line, rootLine: rootLine === null ? line : rootLine };
-      const include = includeAtLine(lines[line].text);
+      const clean = lines[line].text;
+      const directive = clean.match(/^\s*#\s*(\w+)\b(.*)$/);
+      const name = directive ? directive[1].toLowerCase() : null;
+      const argument = directive ? directive[2].trim() : "";
+      const isActive = preprocessorActive();
+      const conditional = preprocessorUncertain() || frames.length > 0;
+
+      if (name === "define" && isActive) {
+        const match = clean.match(/^\s*#\s*define\s+([A-Za-z_]\w*)(?:\s*\(([^)]*)\))?\s*(.*?)\s*$/);
+        if (match) {
+          const macro = {
+            uri: source.uri, line, rootLine: location.rootLine,
+            name: match[1], character: clean.indexOf(match[1]),
+            parameters: match[2] ? match[2].split(",").map(value => value.trim()).filter(Boolean) : null,
+            replacement: match[3], stage: null
+          };
+          macro.documentation = [
+            lines[line].leadingComment,
+            ...lines[line].comments.filter(comment => !comment.standalone).map(comment => comment.inlineText)
+          ].filter(Boolean).join("\n");
+          defines.set(macro.name, macro);
+        }
+        entries.push({ ...location, ...lines[line], conditional });
+        continue;
+      }
+      if (name === "undef") {
+        if (isActive) issues.push({ ...location, message: "The RA preprocessor does not support #undef." });
+        entries.push({ ...location, ...lines[line], conditional });
+        continue;
+      }
+      if (name === "ifndef") {
+        if (isActive) issues.push({ ...location, message: "The RA preprocessor does not support #ifndef." });
+        frames.push({ parentActive: isActive, active: false, matched: false, uncertain: true });
+        entries.push({ ...location, ...lines[line], conditional: true });
+        continue;
+      }
+      if (name === "ifdef" || name === "if") {
+        const result = name === "ifdef" ?
+          /^\s*([A-Za-z_]\w*)\s*$/.test(argument) && defines.has(argument.trim()) :
+          Boolean(evaluatePreprocessor(argument, new Set(defines.keys()), defines));
+        frames.push({ parentActive: isActive, active: isActive && result, matched: result, uncertain: false });
+        entries.push({ ...location, ...lines[line], conditional });
+        continue;
+      }
+      if (name === "elif" || name === "else") {
+        const frame = frames[frames.length - 1];
+        if (frame) {
+          if (name === "elif" && !frame.matched) {
+            const result = Boolean(evaluatePreprocessor(argument, new Set(defines.keys()), defines));
+            frame.active = frame.parentActive && result;
+            frame.matched = result;
+          } else if (name === "else") {
+            frame.active = frame.parentActive && !frame.matched;
+            frame.matched = true;
+          }
+        }
+        entries.push({ ...location, ...lines[line], conditional: true });
+        continue;
+      }
+      if (name === "endif") {
+        if (frames.length) frames.pop();
+        entries.push({ ...location, ...lines[line], conditional: true });
+        continue;
+      }
+      if (!isActive) {
+        entries.push({ ...location, ...lines[line], conditional: true });
+        continue;
+      }
+
+      const include = includeAtLine(clean);
       if (!include) {
-        entries.push({ ...location, ...lines[line] });
+        entries.push({ ...location, ...lines[line], conditional });
         continue;
       }
 
@@ -174,6 +361,7 @@ async function buildIncludeModel(root, resolve, read) {
       }
       await visit(included, location.rootLine);
     }
+    while (frames.length > baseDepth) frames.pop();
     active.delete(key);
   }
 
@@ -203,7 +391,11 @@ async function buildIncludeModel(root, resolve, read) {
       });
     }
   }
-  return { entries, parameters, aliases, issues, dependencies, missingOptional };
+  for (const define of defines.values()) {
+    define.stage = entries.find(entry => entry.uri.toString() === define.uri.toString() &&
+      entry.line === define.line)?.stage || null;
+  }
+  return { entries, parameters, aliases, defines: [...defines.values()], issues, dependencies, missingOptional };
 }
 
 module.exports = { buildIncludeModel, definitionComment, includeAtLine, uncommentLines };

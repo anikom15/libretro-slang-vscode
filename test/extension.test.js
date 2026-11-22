@@ -18,7 +18,7 @@ const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 const { buildIncludeModel, includeAtLine, uncommentLines } = require("../include-model");
-const { buildSemanticModel, semanticIssues, resolveAt } = require("../semantic-model");
+const { builtinType, buildSemanticModel, semanticIssues, resolveAt } = require("../semantic-model");
 const { stageSource, validateWithCompiler, builtinSignatures, rankBuiltinOverloads } = require("../glsl-compiler");
 let signatureLoader = builtinSignatures;
 let compilerLoader = validateWithCompiler;
@@ -273,12 +273,11 @@ function document(text, file = "C:\\shaders\\root.slang") {
   files["C:\\shaders\\shared.inc"] = '#include "nested.inc"\n#pragma stage vertex';
   files["C:\\shaders\\nested.inc"] = '#pragma parameter Gain "Gain" 1.0 0.0 2.0 0.1';
   const rootDocument = document(
-    '#version 450\n#if 0\n#include "shared.inc"\n#endif\n#pragma stage fragment\nfloat value = Gain;'
+    '#version 450\n#if 0\n#include "shared.inc"\n#endif\n#pragma stage vertex\n#pragma stage fragment\nfloat value = Gain;'
   );
   let model = await shaderModel(rootDocument);
-  assert.strictEqual(model.parameters.length, 1);
-  assert.strictEqual(model.parameters[0].uri.path, "C:\\shaders\\nested.inc");
-  assert.strictEqual(model.parameters[0].rootLine, 2);
+  assert.strictEqual(model.parameters.length, 0);
+  assert.strictEqual(model.dependencies.has("C:\\shaders\\shared.inc"), false);
   assert.strictEqual(model.entries.find(entry => entry.text.includes("float value")).stage, "fragment");
   assert.strictEqual((await validateSlang(rootDocument, model)).length, 0);
 
@@ -313,7 +312,7 @@ function document(text, file = "C:\\shaders\\root.slang") {
 
   const unsaved = document('#pragma parameter Gain "Unsaved" 1.0 0.0 2.0 0.1', "C:\\shaders\\nested.inc");
   vscode.workspace.textDocuments.push(unsaved);
-  model = await shaderModel(rootDocument);
+  model = await shaderModel(document('#include "nested.inc"', "C:\\shaders\\root.slang"));
   assert.strictEqual(model.parameters[0].description, "Unsaved");
   vscode.workspace.textDocuments.pop();
 
@@ -428,6 +427,49 @@ function document(text, file = "C:\\shaders\\root.slang") {
     "#pragma stage fragment"
   ].join("\n"));
   assert.strictEqual((await validate(macroType)).length, 0);
+  const macroModel = await shaderModel(macroType);
+  assert.strictEqual(macroModel.defines[0].name, "MY_FLOAT");
+  const macroSemantic = buildSemanticModel(macroModel);
+  assert.strictEqual(macroSemantic.symbols.find(symbol => symbol.name === "Gain").type, "float");
+  assert.strictEqual(builtinType("EnableHDR"), "bool");
+  assert.strictEqual(builtinType("CurrentSubFrame"), "uint");
+  assert.strictEqual(builtinType("TotalSubFrames"), "uint");
+
+  files["C:\\shaders\\conditional.inc"] = "#pragma parameter IncludedGain \"Included gain\" 1 0 2 0.1";
+  const conditionalInclude = await shaderModel(document([
+    "#define ENABLED",
+    "#ifdef ENABLED",
+    '#include "conditional.inc"',
+    "#else",
+    '#include "missing.inc"',
+    "#endif"
+  ].join("\n")));
+  assert.strictEqual(conditionalInclude.parameters.length, 1);
+  assert.strictEqual(conditionalInclude.parameters[0].name, "IncludedGain");
+  assert.strictEqual(conditionalInclude.issues.length, 0);
+
+  const samplerBuiltins = document([
+    "#version 450",
+    "uniform sampler2D Noise;",
+    "#pragma stage fragment",
+    "void main() { vec4 a = texture(Noise, vec2(0)); vec4 b = texture(NoiseFeedback, vec2(0)); vec4 c = NoiseFeedbackSize; }"
+  ].join("\n"));
+  const samplerModel = await shaderModel(samplerBuiltins);
+  const samplerSemantic = buildSemanticModel(samplerModel);
+  assert.strictEqual(builtinType("NoiseSize", samplerModel, samplerSemantic), "vec4");
+  assert.strictEqual(builtinType("NoiseFeedback", samplerModel, samplerSemantic), "sampler2D");
+  assert.strictEqual(builtinType("NoiseFeedbackSize", samplerModel, samplerSemantic), "vec4");
+
+  const unsupportedPreprocessor = await validate(document([
+    "#undef FEATURE",
+    "#ifndef FEATURE",
+    "float hidden;",
+    "#endif",
+    "#pragma stage vertex",
+    "#pragma stage fragment"
+  ].join("\n")));
+  assert.ok(unsupportedPreprocessor.some(item => item.message.includes("#undef")));
+  assert.ok(unsupportedPreprocessor.some(item => item.message.includes("#ifndef")));
 
   const outputDocument = document([
     "#version 450",
@@ -610,6 +652,22 @@ function document(text, file = "C:\\shaders\\root.slang") {
   assert.deepStrictEqual(Array.from(presetLinks, link => preset.getText(link.range)), [
     "pass.slang", "second#pass.slang", "image#one.png", "second.png"
   ]);
+  files["C:\\shaders\\macro-doc.inc"] = [
+    "// Scales a value for the shader pipeline.",
+    "#define SCALE_VALUE(value) ((value) * 2.0) // Doubles the supplied value."
+  ].join("\n");
+  const macroHoverDoc = document([
+    '#include "macro-doc.inc"',
+    "#pragma stage fragment",
+    "void main() { float scaled = SCALE_VALUE(1.0); }"
+  ].join("\n"));
+  const macroHover = await providers.hover.provideHover(macroHoverDoc, {
+    line: 2, character: macroHoverDoc.lineAt(2).text.indexOf("SCALE_VALUE")
+  });
+  assert.ok(macroHover.contents.value.includes("Preprocessor define"));
+  assert.ok(macroHover.contents.value.includes("#define SCALE_VALUE(value) ((value) * 2.0)"));
+  assert.ok(macroHover.contents.value.includes("Scales a value for the shader pipeline."));
+  assert.ok(macroHover.contents.value.includes("Doubles the supplied value."));
   assert.deepStrictEqual(Array.from(presetLinks, link => link.target.path), [
     "C:\\shaders\\pass.slang", "C:\\shaders\\second#pass.slang",
     "C:\\shaders\\image#one.png", "C:\\shaders\\second.png"
@@ -766,12 +824,13 @@ function document(text, file = "C:\\shaders\\root.slang") {
   assert.strictEqual(await providers.hover.provideHover(hoverDoc, hoverPosition), null);
   assert.ok(warnings.some(message => message.includes("compiler unavailable")));
   vscode.workspace.textDocuments.push(unsaved);
-  const position = { line: 5, character: 15 };
-  const definitions = await providers.definition.provideDefinition(rootDocument, position);
+  const unsavedRoot = document('#include "nested.inc"\nfloat value = Gain;', "C:\\shaders\\root.slang");
+  const position = { line: 1, character: unsavedRoot.lineAt(1).text.indexOf("Gain") };
+  const definitions = await providers.definition.provideDefinition(unsavedRoot, position);
   assert.strictEqual(definitions.length, 1);
   assert.strictEqual(definitions[0].uri.path, unsaved.uri.path);
   assert.strictEqual(definitions[0].range.start.character, 18);
-  const hover = await providers.hover.provideHover(rootDocument, position);
+  const hover = await providers.hover.provideHover(unsavedRoot, position);
   assert.ok(hover.contents.value.includes("Unsaved"));
   vscode.workspace.textDocuments.pop();
   const functionDefinitions = await providers.definition.provideDefinition(semanticDocument, { line: 10, character: 28 });

@@ -22,7 +22,8 @@
     },
     "preprocessor": {
       "patterns": [
-        {"name": "meta.preprocessor.glsl", "match": "^\\s*#\\s*(define|undef|if|ifdef|ifndef|else|elif|endif|extension|version|line|error)\\b"},
+        {"name": "meta.preprocessor.define.libretro-slang", "match": "^\\s*(#\\s*define)\\s+([A-Za-z_]\\w*)", "captures": {"1":{"name":"keyword.control.directive.libretro-slang"},"2":{"name":"entity.name.function.macro.libretro-slang"}}},
+        {"name": "meta.preprocessor.glsl", "match": "^\\s*#\\s*(define|if|ifdef|else|elif|endif|extension|version|line|error)\\b"},
         {"name": "constant.other.version.glsl", "match": "(?<=#version\\s)\\d+(?:\\s+es)?"},
         {"name": "keyword.control.import.glsl", "match": "^\\s*#\\s*include(?:_optional)?\\b"}
       ]
@@ -54,7 +55,7 @@
     },
     "builtins": {
       "patterns": [
-        {"name": "variable.language.libretro-slang", "match": "\\b(MVP|SourceSize|OutputSize|FinalViewportSize|OriginalSize|FrameCount|FrameDirection|Rotation|OriginalAspect|OriginalAspectRotated|OriginalFPS|FrameTimeDelta|Original|Source|PassOutput\\d+|PassFeedback\\d+|OriginalHistory\\d+|User\\d+|PassOutputSize\\d+|PassFeedbackSize\\d+|OriginalHistorySize\\d+|UserSize\\d+)\\b"},
+        {"name": "variable.language.libretro-slang", "match": "\\b(MVP|SourceSize|OutputSize|FinalViewportSize|OriginalSize|FrameCount|FrameDirection|Rotation|OriginalAspect|OriginalAspectRotated|OriginalFPS|FrameTimeDelta|EnableHDR|CurrentSubFrame|TotalSubFrames|Original|Source|PassOutput\\d+|PassFeedback\\d+|OriginalHistory\\d+|User\\d+|PassOutputSize\\d+|PassFeedbackSize\\d+|OriginalHistorySize\\d+|UserSize\\d+|[A-Za-z_]\\w*(?:Size|Feedback|FeedbackSize))\\b"},
         {"name":"support.function.builtin.glsl","match":"\\b(radians|degrees|sin|cos|tan|asin|acos|atan|sinh|cosh|tanh|asinh|acosh|atanh|pow|exp|log|exp2|log2|sqrt|inversesqrt|abs|sign|floor|trunc|round|roundEven|ceil|fract|mod|modf|min|max|clamp|mix|step|smoothstep|isnan|isinf|floatBitsToInt|floatBitsToUint|intBitsToFloat|uintBitsToFloat|fma|frexp|ldexp|length|distance|dot|cross|normalize|faceforward|reflect|refract|matrixCompMult|outerProduct|transpose|determinant|inverse|lessThan|lessThanEqual|greaterThan|greaterThanEqual|equal|notEqual|any|all|not|texture|textureProj|textureLod|textureOffset|texelFetch|texelFetchOffset|textureProjOffset|textureLodOffset|textureProjLod|textureProjLodOffset|textureGrad|textureGradOffset|textureProjGrad|textureProjGradOffset|textureSize|textureQueryLod|textureQueryLevels|textureGather|textureGatherOffset|textureGatherOffsets|dFdx|dFdy|fwidth|dFdxFine|dFdyFine|fwidthFine|dFdxCoarse|dFdyCoarse|fwidthCoarse)\\b(?=\\s*\\()"},
         {"name": "variable.language.glsl", "match": "\\b(gl_Position|gl_FragCoord|gl_FragDepth|gl_GlobalInvocationID|gl_LocalInvocationID|gl_WorkGroupID|gl_VertexIndex|gl_InstanceIndex)\\b"}
       ]
