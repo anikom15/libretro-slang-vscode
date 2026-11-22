@@ -15,6 +15,12 @@
 
 "use strict";
 
+/**
+ * Replace comments with spaces while preserving line and character offsets.
+ * Quoted strings are retained so comment markers inside them are not stripped.
+ * @param {string} text Source text.
+ * @returns {string[]} Comment-free source lines.
+ */
 function uncommentLines(text) {
   let inBlock = false;
   return text.split(/\r\n|\r|\n/).map(line => {
@@ -49,6 +55,10 @@ function uncommentLines(text) {
   });
 }
 
+/**
+ * Pair comment-free source lines with adjacent and inline comment metadata.
+ * Blank lines separate a leading comment from a subsequent declaration.
+ */
 function sourceLines(text) {
   const raw = text.split(/\r\n|\r|\n/);
   const clean = uncommentLines(text);
@@ -89,6 +99,11 @@ function sourceLines(text) {
   });
 }
 
+/**
+ * Combine the leading comment of a declaration with the comment immediately
+ * following its terminator. Both arguments are semantic tokens with source entries.
+ * @returns {string} Documentation text, or an empty string.
+ */
 function definitionComment(start, end) {
   const leading = start.entry.leadingComment;
   const inline = end.entry.comments.find(comment => comment.start >= end.character + end.value.length &&
@@ -96,12 +111,29 @@ function definitionComment(start, end) {
   return [leading, inline && inline.inlineText].filter(Boolean).join("\n");
 }
 
+/**
+ * Parse an include directive from a comment-free source line.
+ * @param {string} text Source line.
+ * @returns {{path: string, optional: boolean}|null}
+ */
 function includeAtLine(text) {
   const match = text.match(/^\s*#\s*(?:(pragma)\s+)?(include|include_optional)\s+"([^"]+)"/);
   if (!match || (match[2] === "include_optional" && !match[1])) return null;
   return { path: match[3], optional: match[2] === "include_optional" };
 }
 
+/**
+ * Expand includes in source order and collect stages, parameters and aliases.
+ * The resolver maps an including URI and path to a URI; read returns a source
+ * object or null for a missing file. Each expanded entry retains its own URI and
+ * line as well as rootLine, the root document's line for diagnostics. Stage
+ * directives propagate through include boundaries. Cycles and read failures are
+ * reported in issues; a missing optional include sets missingOptional instead.
+ * @param {{uri: object, text: string}} root Root source.
+ * @param {function(object, string): object} resolve Resolve an include URI.
+ * @param {function(object): Promise<?{uri: object, text: string}>} read Read a source.
+ * @returns {Promise<object>} Expanded entries, declarations, issues and dependencies.
+ */
 async function buildIncludeModel(root, resolve, read) {
   const entries = [];
   const issues = [];

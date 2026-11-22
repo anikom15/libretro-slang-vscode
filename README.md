@@ -20,6 +20,10 @@ VS Code language support for Libretro `.slang` shaders and `.slangp` presets.
 - Document outlines for shader stages and parameters
 - Completion suggestions for pragmas, built-in uniforms, and preset keys
 
+Preset shader counts may be quoted or unquoted. Links are provided for shader
+paths and for texture paths whose keys are listed in `textures`, not for other
+quoted preset values.
+
 ## Supported files
 
 - `.slang`
@@ -49,6 +53,8 @@ without a stage, the fragment stage is used; files without `#version` use GLSL 4
 for this help. A warning reports when
 the compiler is unavailable. Set `libretro-slang.validateGlsl` to `false` to disable
 compiler diagnostics. `libretro-slang.validateStructure` disables all shader diagnostics.
+Edits revalidate the changed shader and open shaders that depend on the changed
+include; configuration changes revalidate all open shaders.
 Set the `GLSLANG_TEST_PATH` environment variable to the compiler executable when running
 `npm test` to include compiler integration tests.
 

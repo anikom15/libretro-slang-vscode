@@ -17,6 +17,15 @@
 
 const { spawn } = require("child_process");
 
+/**
+ * Run glslangValidator with source on stdin, collecting stdout and stderr together.
+ * Compiler exit codes are returned to the caller; spawn, timeout and output-limit
+ * failures reject. EPIPE is ignored because the compiler may exit before reading.
+ * @param {string} executable Compiler executable or path.
+ * @param {string[]} args Compiler arguments.
+ * @param {string} source Source to write to stdin.
+ * @returns {Promise<{code: number, output: string}>}
+ */
 function runCompiler(executable, args, source) {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { windowsHide: true });
@@ -51,6 +60,14 @@ function runCompiler(executable, args, source) {
   });
 }
 
+/**
+ * Select one stage of the expanded include model for compilation. Shared lines
+ * appear in both stages, and stripped Slang pragmas leave blank lines so compiler
+ * line numbers continue to index the returned entries.
+ * @param {object} model Expanded include model.
+ * @param {string} stage Shader stage to select.
+ * @returns {{entries: object[], text: string}} Entries corresponding to source lines.
+ */
 function stageSource(model, stage) {
   const entries = model.entries.filter(entry => !entry.stage || entry.stage === stage);
   return {
@@ -59,6 +76,14 @@ function stageSource(model, stage) {
   };
 }
 
+/**
+ * Compile each present stage and map compiler messages back to source entries.
+ * Compilation is skipped if includes have errors; a failed compiler invocation
+ * without a usable source diagnostic rejects rather than appearing successful.
+ * @param {object} model Expanded include model.
+ * @param {string} executable Compiler executable or path.
+ * @returns {Promise<object[]>} Source entries augmented with severity and message.
+ */
 async function validateWithCompiler(model, executable) {
   if (model.issues.length) return [];
   const issues = [];
@@ -86,6 +111,15 @@ async function validateWithCompiler(model, executable) {
   return issues;
 }
 
+/**
+ * Read compiler-provided built-in signatures for a stage and version.
+ * Signatures retain glslangValidator's type descriptions, not GLSL syntax.
+ * Rejects if the compiler fails or its output contains no recognizable signatures.
+ * @param {string} executable Compiler executable or path.
+ * @param {string} stage Shader stage; "vertex" selects vert, otherwise frag.
+ * @param {string} version Complete GLSL version directive.
+ * @returns {Promise<Map<string, string[]>>} Function names mapped to overloads.
+ */
 async function builtinSignatures(executable, stage, version) {
   const result = await runCompiler(executable, ["--stdin", "-S", stage === "vertex" ? "vert" : "frag",
     "--dump-builtin-symbols", "--no-link"], `${version}\nvoid main() {}\n`);
@@ -101,6 +135,17 @@ async function builtinSignatures(executable, stage, version) {
   return signatures;
 }
 
+/**
+ * Narrow and rank compiler signatures using inferred call argument types.
+ * Unknown types and unrecognized descriptors stay eligible; same-width numeric
+ * types are conservatively treated as potential conversions. This is not full
+ * GLSL overload resolution, including qualifier and conversion rules.
+ * @param {string[]} signatures Compiler-provided overload descriptions.
+ * @param {(string|null)[]|null} argumentTypes Null for an incomplete call; null
+ * entries represent arguments whose types could not be inferred.
+ * @returns {{overloads: string[], fallback: boolean}} All signatures are returned
+ * with fallback set when no candidate matched.
+ */
 function rankBuiltinOverloads(signatures, argumentTypes) {
   const commonFirst = (a, b) => {
     const score = signature => (/\b(?:float16_t|f16sampler\w*|double|int64_t|uint64_t)\b/.test(signature) ? 1 : 0);

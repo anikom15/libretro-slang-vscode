@@ -17,10 +17,11 @@ const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
-const { buildIncludeModel } = require("../include-model");
+const { buildIncludeModel, includeAtLine, uncommentLines } = require("../include-model");
 const { buildSemanticModel, semanticIssues, resolveAt } = require("../semantic-model");
-const { validateWithCompiler, builtinSignatures, rankBuiltinOverloads } = require("../glsl-compiler");
+const { stageSource, validateWithCompiler, builtinSignatures, rankBuiltinOverloads } = require("../glsl-compiler");
 let signatureLoader = builtinSignatures;
+let compilerLoader = validateWithCompiler;
 
 const root = path.resolve(__dirname, "..");
 
@@ -77,6 +78,10 @@ const vscode = {
   workspace: {
     textDocuments: [],
     fs: {
+      async stat(uri) {
+        if (!(uri.path in files)) throw new Error("Not found");
+        return {};
+      },
       async readFile(uri) {
         if (!(uri.path in files)) {
           const error = new Error("Not found");
@@ -98,13 +103,13 @@ const sandbox = {
     if (name === "vscode") return vscode;
     if (name === "./include-model") return require("../include-model");
     if (name === "./semantic-model") return require("../semantic-model");
-    if (name === "./glsl-compiler") return { validateWithCompiler, rankBuiltinOverloads, builtinSignatures: (...args) => signatureLoader(...args) };
+    if (name === "./glsl-compiler") return { validateWithCompiler: (...args) => compilerLoader(...args), rankBuiltinOverloads, builtinSignatures: (...args) => signatureLoader(...args) };
     throw new Error(`Unexpected module: ${name}`);
   },
   module: { exports: {} },
   Buffer
 };
-vm.runInNewContext(extensionSource + "\nmodule.exports.test = { validateSlang, shaderModel, collectIncludePaths };", sandbox);
+vm.runInNewContext(extensionSource + "\nmodule.exports.test = { validateSlang, validatePreset, shaderModel, collectIncludePaths };", sandbox);
 
 function document(text, file = "C:\\shaders\\root.slang") {
   const lines = text.split("\n");
@@ -123,10 +128,110 @@ function document(text, file = "C:\\shaders\\root.slang") {
 }
 
 (async () => {
-  const { validateSlang, shaderModel, collectIncludePaths } = sandbox.module.exports.test;
+  const { validateSlang, validatePreset, shaderModel, collectIncludePaths } = sandbox.module.exports.test;
   async function validate(doc) {
     return validateSlang(doc, await shaderModel(doc));
   }
+
+  const commentSource = [
+    'const char *url = "https://example/\\"/*quoted*/"; /* start',
+    'end */ float x; // trailing',
+    '/* unterminated'
+  ];
+  const cleanLines = uncommentLines(commentSource.join("\r\n"));
+  assert.strictEqual(cleanLines.length, commentSource.length);
+  assert.ok(cleanLines.every((line, i) => line.length === commentSource[i].length));
+  assert.ok(cleanLines[0].includes('"https://example/\\"/*quoted*/"'));
+  assert.strictEqual(cleanLines[1].indexOf("float x;"), commentSource[1].indexOf("float x;"));
+  assert.ok(!cleanLines[1].includes("trailing"));
+  assert.strictEqual(cleanLines[2].trim(), "");
+  assert.deepStrictEqual(includeAtLine('#include "part.inc"'), { path: "part.inc", optional: false });
+  assert.deepStrictEqual(includeAtLine('#pragma include_optional "part.inc"'), { path: "part.inc", optional: true });
+  assert.strictEqual(includeAtLine('#include_optional "part.inc"'), null);
+  assert.strictEqual(includeAtLine("#include <part.inc>"), null);
+
+  const directRoot = makeUri("C:\\unit\\root.slang");
+  const directFiles = {
+    "C:\\unit\\sub\\shared.inc": [
+      "#pragma stage vertex", '#include "nested.inc"', "float afterNested;"
+    ].join("\r\n"),
+    "C:\\unit\\sub\\nested.inc": [
+      "#pragma stage fragment", '#pragma name Feedback', "// Strength documentation.",
+      '#pragma parameter Strength "Strength" 1 0 2 0.1 // Inline note.'
+    ].join("\r")
+  };
+  const resolveDirect = (uri, name) => makeUri(path.win32.resolve(uri.path, "..", name));
+  const readDirect = async uri => {
+    if (uri.path.endsWith("denied.inc")) throw new Error("Access denied");
+    return Object.prototype.hasOwnProperty.call(directFiles, uri.path) ? { uri, text: directFiles[uri.path] } : null;
+  };
+  const directModel = await buildIncludeModel({
+    uri: directRoot,
+    text: [
+      "float common;", '#include "sub/shared.inc"', "float afterInclude;",
+      '#pragma include_optional "missing.inc"', '#pragma include_optional "denied.inc"',
+      '#include "missing.inc"'
+    ].join("\n")
+  }, resolveDirect, readDirect);
+  assert.deepStrictEqual([...directModel.dependencies].sort(), [
+    "C:\\unit\\denied.inc", "C:\\unit\\missing.inc",
+    "C:\\unit\\sub\\nested.inc", "C:\\unit\\sub\\shared.inc"
+  ]);
+  assert.strictEqual(directModel.missingOptional, true);
+  assert.deepStrictEqual(directModel.issues.map(issue => [issue.line, issue.rootLine, issue.message]), [
+    [4, 4, 'Cannot read include "denied.inc": Access denied'],
+    [5, 5, 'Include "missing.inc" was not found.']
+  ]);
+  const nestedParameter = directModel.parameters[0];
+  assert.strictEqual(nestedParameter.uri.path, "C:\\unit\\sub\\nested.inc");
+  assert.strictEqual(nestedParameter.line, 3);
+  assert.strictEqual(nestedParameter.rootLine, 1);
+  assert.strictEqual(nestedParameter.stage, "fragment");
+  assert.strictEqual(nestedParameter.documentation, "Strength documentation.\nInline note.");
+  assert.strictEqual(directModel.aliases[0].name, "Feedback");
+  assert.strictEqual(directModel.entries.find(entry => entry.text === "float afterNested;").stage, "fragment");
+  assert.strictEqual(directModel.entries.find(entry => entry.text === "float afterInclude;").stage, "fragment");
+  const vertexSource = stageSource(directModel, "vertex");
+  assert.strictEqual(vertexSource.entries.length, 2);
+  assert.strictEqual(vertexSource.text, "float common;\n\n");
+  const fragmentSource = stageSource(directModel, "fragment");
+  assert.strictEqual(fragmentSource.text.split("\n").length - 1, fragmentSource.entries.length);
+  assert.ok(!fragmentSource.text.includes("#pragma parameter"));
+  assert.ok(fragmentSource.text.includes("float afterNested;"));
+
+  const nestedFailureFiles = {
+    "C:\\unit\\sub\\outer.inc": '#include "missing.inc"\n#include "../root.slang"'
+  };
+  const nestedFailures = await buildIncludeModel(
+    { uri: directRoot, text: '#include "sub/outer.inc"' },
+    resolveDirect,
+    async uri => Object.prototype.hasOwnProperty.call(nestedFailureFiles, uri.path) ?
+      { uri, text: nestedFailureFiles[uri.path] } : null
+  );
+  assert.deepStrictEqual(nestedFailures.issues.map(issue => [issue.uri.path, issue.line, issue.rootLine, issue.message]), [
+    ["C:\\unit\\sub\\outer.inc", 0, 0, 'Include "missing.inc" was not found.'],
+    ["C:\\unit\\sub\\outer.inc", 1, 0, 'Cyclic include "../root.slang".']
+  ]);
+  assert.ok(nestedFailures.dependencies.has("C:\\unit\\root.slang"));
+
+  const numericOverloads = [
+    "bool choose(in bool)",
+    "double choose(in double)",
+    "float choose(in float)",
+    "vec2 choose(in 2-component vector of float)",
+    "special choose(in unsupportedType)"
+  ];
+  const rankedFloat = rankBuiltinOverloads(numericOverloads, ["float"]);
+  assert.deepStrictEqual(rankedFloat.overloads, [
+    "float choose(in float)", "double choose(in double)", "special choose(in unsupportedType)"
+  ]);
+  assert.strictEqual(rankedFloat.fallback, false);
+  assert.ok(rankBuiltinOverloads(numericOverloads, [null]).overloads.includes("bool choose(in bool)"));
+  assert.strictEqual(rankBuiltinOverloads(numericOverloads, null).overloads.length, numericOverloads.length);
+  const noArityMatch = rankBuiltinOverloads(numericOverloads, ["float", "float"]);
+  assert.strictEqual(noArityMatch.fallback, true);
+  assert.strictEqual(noArityMatch.overloads.length, numericOverloads.length);
+
   const incomplete = await validate(document("vec4 helper;"));
   assert.strictEqual(incomplete.length, 3);
   assert.ok(incomplete.every(item => item.severity === vscode.DiagnosticSeverity.Warning));
@@ -432,6 +537,9 @@ function document(text, file = "C:\\shaders\\root.slang") {
     Location: class Location {
       constructor(uri, range) { Object.assign(this, { uri, range }); }
     },
+    DocumentLink: class DocumentLink {
+      constructor(range, target) { Object.assign(this, { range, target }); }
+    },
     MarkdownString: class MarkdownString {
       constructor(value = "") { this.value = value; }
       appendMarkdown(value) { this.value += value; return this; }
@@ -471,7 +579,7 @@ function document(text, file = "C:\\shaders\\root.slang") {
       registerHoverProvider: (selector, provider) => { providers.hover = provider; return disposable; },
       registerDocumentSemanticTokensProvider: (selector, provider) => { providers.semantic = provider; return disposable; },
       registerSignatureHelpProvider: (selector, provider) => { providers.signature = provider; return disposable; },
-      registerDocumentLinkProvider: () => disposable,
+      registerDocumentLinkProvider: (selector, provider) => { providers[`${selector.language}Links`] = provider; return disposable; },
       registerDocumentSymbolProvider: () => disposable,
       registerCompletionItemProvider: () => disposable
     }
@@ -488,6 +596,33 @@ function document(text, file = "C:\\shaders\\root.slang") {
   vscode.workspace.getConfiguration = () => ({ get: (name, fallback) =>
     name === "glslangValidatorPath" ? process.env.GLSLANG_TEST_PATH || "test-compiler" : fallback });
   sandbox.module.exports.activate({ subscriptions: [] });
+  files["C:\\shaders\\pass.slang"] = "#version 450";
+  files["C:\\shaders\\second#pass.slang"] = "#version 450";
+  const preset = document([
+    'shaders = "2"', 'shader0 = "pass.slang"', "shader1 = 'second#pass.slang' # comment",
+    'textures = "lookup; another"', 'lookup = "image#one.png"', "another = second.png",
+    'wrap_mode0 = "repeat"', 'scale_type0 = "source"', 'alias0 = "pass"',
+    'unknown = "not-a-path"'
+  ].join("\n"), "C:\\shaders\\preset.slangp");
+  assert.strictEqual((await validatePreset(preset)).length, 0);
+  const presetLinks = providers["libretro-slang-presetLinks"].provideDocumentLinks(preset);
+  assert.strictEqual(presetLinks.length, 4);
+  assert.deepStrictEqual(Array.from(presetLinks, link => preset.getText(link.range)), [
+    "pass.slang", "second#pass.slang", "image#one.png", "second.png"
+  ]);
+  assert.deepStrictEqual(Array.from(presetLinks, link => link.target.path), [
+    "C:\\shaders\\pass.slang", "C:\\shaders\\second#pass.slang",
+    "C:\\shaders\\image#one.png", "C:\\shaders\\second.png"
+  ]);
+  for (const value of ['"1"', "1", "'1'"]) {
+    assert.strictEqual((await validatePreset(document(`shaders = ${value}\nshader0 = "pass.slang"`))).length, 0);
+  }
+  for (const value of ['"1.5"', "2garbage", '"0"', '"9007199254740992"']) {
+    const errors = await validatePreset(document(`shaders = ${value}`));
+    assert.ok(errors.some(item => item.message.includes("positive integer")));
+  }
+  const missingPreset = await validatePreset(document('shaders = "1"\nshader0 = "missing.slang"'));
+  assert.ok(missingPreset.some(item => item.message.includes("missing.slang")));
   if (process.env.GLSLANG_TEST_PATH) {
     vscode.workspace.getConfiguration = () => ({ get: (name, fallback) =>
       name === "glslangValidatorPath" ? process.env.GLSLANG_TEST_PATH : fallback });
@@ -802,6 +937,107 @@ function document(text, file = "C:\\shaders\\root.slang") {
   ].join("\n"));
   const initializedHover = await providers.hover.provideHover(initializedGlobal, { line: 2, character: 28 });
   assert.ok(initializedHover.contents.value.includes("Initial tone."));
+
+  const handlers = {};
+  const timers = new Map();
+  let nextTimer = 0;
+  sandbox.setTimeout = callback => { const id = ++nextTimer; timers.set(id, callback); return id; };
+  sandbox.clearTimeout = id => timers.delete(id);
+  for (const name of ["onDidOpenTextDocument", "onDidChangeTextDocument", "onDidSaveTextDocument",
+    "onDidCloseTextDocument", "onDidChangeConfiguration"]) {
+    vscode.workspace[name] = callback => { handlers[name] = callback; return disposable; };
+  }
+  vscode.workspace.createFileSystemWatcher = () => ({
+    ...disposable,
+    onDidCreate: callback => { handlers.fileCreated = callback; return disposable; },
+    onDidChange: callback => { handlers.fileChanged = callback; return disposable; },
+    onDidDelete: callback => { handlers.fileDeleted = callback; return disposable; }
+  });
+  const compiled = [];
+  compilerLoader = async model => { compiled.push(model.entries[0].uri.path); return []; };
+  vscode.workspace.getConfiguration = () => ({ get: (name, fallback) =>
+    name === "glslangValidatorPath" ? "mock-compiler" : fallback });
+  files["C:\\shaders\\dependency.inc"] = '#include "nested-dependency.inc"';
+  files["C:\\shaders\\nested-dependency.inc"] = "float helper;";
+  const shaderA = document('#version 450\n#include "dependency.inc"\n#pragma stage vertex\n#pragma stage fragment',
+    "C:\\shaders\\a.slang");
+  const shaderB = document("#version 450\n#pragma stage vertex\n#pragma stage fragment", "C:\\shaders\\b.slang");
+  shaderA.languageId = shaderB.languageId = "libretro-slang";
+  const unrelatedDoc = document("unrelated", "C:\\shaders\\notes.txt");
+  unrelatedDoc.languageId = "plaintext";
+  vscode.workspace.textDocuments = [shaderA, shaderB, unrelatedDoc];
+  const subscriptions = [];
+  sandbox.module.exports.activate({ subscriptions });
+  async function flushTimers() {
+    const callbacks = [...timers.values()];
+    timers.clear();
+    for (const callback of callbacks) callback();
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  await flushTimers();
+  assert.deepStrictEqual(compiled.sort(), ["C:\\shaders\\a.slang", "C:\\shaders\\b.slang"]);
+  compiled.length = 0;
+  handlers.onDidChangeTextDocument({ document: unrelatedDoc });
+  await flushTimers();
+  assert.deepStrictEqual(compiled, []);
+  handlers.onDidChangeTextDocument({ document: shaderB });
+  await flushTimers();
+  assert.deepStrictEqual(compiled, ["C:\\shaders\\b.slang"]);
+  compiled.length = 0;
+  const includedDoc = document("float updated;", "C:\\shaders\\nested-dependency.inc");
+  includedDoc.languageId = "plaintext";
+  vscode.workspace.textDocuments.push(includedDoc);
+  handlers.onDidOpenTextDocument(includedDoc);
+  await flushTimers();
+  assert.deepStrictEqual(compiled, ["C:\\shaders\\a.slang"]);
+  compiled.length = 0;
+  handlers.onDidChangeTextDocument({ document: includedDoc });
+  await flushTimers();
+  assert.deepStrictEqual(compiled, ["C:\\shaders\\a.slang"]);
+  compiled.length = 0;
+  handlers.onDidCloseTextDocument(includedDoc);
+  vscode.workspace.textDocuments.pop();
+  await flushTimers();
+  assert.deepStrictEqual(compiled, ["C:\\shaders\\a.slang"]);
+  compiled.length = 0;
+  handlers.fileChanged(makeUri("C:\\shaders\\dependency.inc"));
+  await flushTimers();
+  assert.deepStrictEqual(compiled, ["C:\\shaders\\a.slang"]);
+  compiled.length = 0;
+  handlers.fileCreated(makeUri("C:\\shaders\\unrelated.inc"));
+  await flushTimers();
+  assert.deepStrictEqual(compiled, []);
+
+  files["C:\\shaders\\late.inc"] = "float late;";
+  const changedShaderA = document('#version 450\n#include "late.inc"\n#pragma stage vertex\n#pragma stage fragment',
+    "C:\\shaders\\a.slang");
+  changedShaderA.languageId = "libretro-slang";
+  vscode.workspace.textDocuments[0] = changedShaderA;
+  const originalRead = vscode.workspace.fs.readFile;
+  let releaseRead;
+  let readStarted = false;
+  const blockedRead = new Promise(resolve => { releaseRead = resolve; });
+  vscode.workspace.fs.readFile = async uri => {
+    if (uri.path.endsWith("late.inc") && !readStarted) {
+      readStarted = true;
+      await blockedRead;
+    }
+    return originalRead(uri);
+  };
+  handlers.onDidChangeTextDocument({ document: changedShaderA });
+  await flushTimers();
+  assert.ok(readStarted);
+  assert.deepStrictEqual(compiled, []);
+  const lateDoc = document("float updated;", "C:\\shaders\\late.inc");
+  lateDoc.languageId = "plaintext";
+  handlers.onDidChangeTextDocument({ document: lateDoc });
+  await flushTimers();
+  assert.deepStrictEqual(compiled, ["C:\\shaders\\a.slang"]);
+  releaseRead();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepStrictEqual(compiled, ["C:\\shaders\\a.slang"]);
+  vscode.workspace.fs.readFile = originalRead;
+  for (const subscription of subscriptions) subscription.dispose();
   console.log("Extension metadata, grammar, include model, and diagnostic tests passed.");
 })().catch(error => {
   console.error(error);

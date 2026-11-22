@@ -87,6 +87,7 @@ function lineRange(document, line) {
   return document.lineAt(line).range;
 }
 
+/** Collect parameter pragmas from the current document for the document outline. */
 function findParameterDeclarations(document) {
   const declarations = [];
   const pattern = /^\s*#\s*pragma\s+parameter\s+([A-Za-z_]\w*)\s*(?:"([^"]*)")?\s*(.*)$/;
@@ -105,6 +106,7 @@ function findParameterDeclarations(document) {
   return declarations;
 }
 
+/** Collect include directives with their document line numbers, ignoring comments. */
 function collectIncludePaths(document) {
   const includes = [];
   const lines = uncommentLines(document.getText());
@@ -119,6 +121,11 @@ function resolveInclude(uri, path) {
   return vscode.Uri.joinPath(vscode.Uri.joinPath(uri, ".."), path);
 }
 
+/**
+ * Expand a shader using open editor contents in preference to the filesystem.
+ * Missing files return null to the include model; other read errors are reported
+ * by that model as include issues.
+ */
 async function shaderModel(document) {
   return buildIncludeModel(
     { uri: document.uri, text: document.getText() },
@@ -150,6 +157,24 @@ function diagnostic(document, line, message, severity = vscode.DiagnosticSeverit
   return new vscode.Diagnostic(lineRange(document, line), message, severity);
 }
 
+/**
+ * Parse a preset assignment, keeping the value's source offset for document links.
+ * Quoted values may contain # characters; unquoted values end at a comment.
+ */
+function presetAssignment(text, line) {
+  const match = text.match(/^\s*([A-Za-z_]\w*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^#]*?))\s*(?:#.*)?$/);
+  if (!match) return null;
+  const quoted = match[2] !== undefined || match[3] !== undefined;
+  const value = quoted ? (match[2] !== undefined ? match[2] : match[3]) : match[4].trim();
+  const valueStart = text.indexOf("=", text.indexOf(match[1]) + match[1].length) + 1;
+  const leading = text.slice(valueStart).match(/^\s*/)[0].length;
+  return { key: match[1], value, line, start: valueStart + leading + (quoted ? 1 : 0) };
+}
+
+/**
+ * Produce Slang structure and semantic diagnostics for an expanded shader.
+ * Included-file issues are reported on their corresponding root document line.
+ */
 async function validateSlang(document, model) {
   const diagnostics = [];
   if (!document.lineCount) return diagnostics;
@@ -236,36 +261,36 @@ async function validateSlang(document, model) {
   return diagnostics;
 }
 
+/** Check preset syntax, shader count and referenced shader paths. */
 async function validatePreset(document) {
   const diagnostics = [];
   const lines = [];
   for (let line = 0; line < document.lineCount; line++) {
     const text = document.lineAt(line).text;
     if (!text.trim() || /^\s*#/.test(text)) continue;
-    const match = text.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=([^#]*?)\s*(?:#.*)?$/);
-    if (!match) {
+    const assignment = presetAssignment(text, line);
+    if (!assignment) {
       diagnostics.push(diagnostic(document, line, "Expected preset syntax: key = value"));
       continue;
     }
-    lines.push({ key: match[1], value: match[2].trim(), line });
+    lines.push(assignment);
   }
 
-  const keys = lines.map(entry => entry);
+  const keys = lines;
   const shadersEntry = keys.find(entry => entry.key === "shaders");
-  const count = shadersEntry ? Number.parseInt(shadersEntry.value, 10) : 0;
-  if (shadersEntry && (!Number.isInteger(count) || count < 1)) {
+  const parsedCount = shadersEntry && /^\d+$/.test(shadersEntry.value) ? Number(shadersEntry.value) : 0;
+  const count = Number.isSafeInteger(parsedCount) && parsedCount > 0 ? parsedCount : 0;
+  if (shadersEntry && !count) {
     diagnostics.push(diagnostic(document, shadersEntry.line, '"shaders" must be a positive integer.'));
   }
 
   const declaredParameters = new Set();
-  for (let i = 0; i < count; i++) {
-    const entry = keys.find(item => item.key === `shader${i}`);
-    if (!entry) continue;
-    const pathMatch = entry.value.match(/^["']([^"']+)["']$/);
-    if (!pathMatch) continue;
-    const resolved = vscode.Uri.joinPath(vscode.Uri.joinPath(document.uri, ".."), pathMatch[1]);
+  for (const entry of keys) {
+    const shader = /^shader(0|[1-9]\d*)$/.exec(entry.key);
+    if (!shader || Number(shader[1]) >= count || !entry.value) continue;
+    const resolved = vscode.Uri.joinPath(vscode.Uri.joinPath(document.uri, ".."), entry.value);
     if (!(await pathExists(resolved))) {
-      diagnostics.push(diagnostic(document, entry.line, `Shader "${pathMatch[1]}" was not found.`));
+      diagnostics.push(diagnostic(document, entry.line, `Shader "${entry.value}" was not found.`));
       continue;
     }
     try {
@@ -288,6 +313,7 @@ async function validatePreset(document) {
   return diagnostics;
 }
 
+/** Register language providers, diagnostics and workspace event handlers. */
 function activate(context) {
   const slangSelector = { language: "libretro-slang", scheme: "file" };
   const presetSelector = { language: "libretro-slang-preset", scheme: "file" };
@@ -298,8 +324,13 @@ function activate(context) {
   const dependencies = new Map();
   const signatureCache = new Map();
   const validationTimers = new Map();
+  const pendingModels = new Set();
   context.subscriptions.push(diagnosticCollection, output, semanticChanges);
 
+  /**
+   * Cache compiler signature requests by executable, stage and version.
+   * Compiler failures are logged and surfaced to the user.
+   */
   async function getBuiltinSignatures(document, stage) {
     const executable = vscode.workspace.getConfiguration("libretro-slang").get("glslangValidatorPath", "glslangValidator");
     const first = document.lineAt(0).text.trim();
@@ -317,6 +348,7 @@ function activate(context) {
     }
   }
 
+  /** Refresh diagnostics, discarding results superseded by a newer update. */
   async function updateDiagnostics(document) {
     if (!document) return;
     const key = document.uri.toString();
@@ -326,8 +358,16 @@ function activate(context) {
     if (document.languageId === "libretro-slang") {
       const enabled = vscode.workspace.getConfiguration("libretro-slang").get("validateStructure", true);
       if (enabled) {
-        const model = await shaderModel(document);
+        let model;
+        try {
+          model = await shaderModel(document);
+        } finally {
+          if (generations.get(key) === generation) pendingModels.delete(key);
+        }
+        if (generations.get(key) !== generation) return;
+        dependencies.set(key, model.dependencies);
         diagnostics = await validateSlang(document, model);
+        if (generations.get(key) !== generation) return;
         const configuration = vscode.workspace.getConfiguration("libretro-slang");
         if (/\.slang$/i.test(document.uri.path) && configuration.get("validateGlsl", true) &&
             /^\s*#\s*version\s+\d+/.test(document.lineAt(0).text)) {
@@ -343,10 +383,10 @@ function activate(context) {
             output.appendLine(`GLSL validation failed for ${key}: ${error.stack || error.message}`);
           }
         }
-        if (generations.get(key) === generation) dependencies.set(key, model.dependencies);
       } else {
         diagnostics = [];
-        dependencies.delete(key);
+        pendingModels.delete(key);
+        dependencies.set(key, new Set());
       }
     } else if (document.languageId === "libretro-slang-preset") {
       diagnostics = await validatePreset(document);
@@ -359,6 +399,7 @@ function activate(context) {
   function schedule(document) {
     const key = document.uri.toString();
     generations.set(key, (generations.get(key) || 0) + 1);
+    if (document.languageId === "libretro-slang") pendingModels.add(key);
     clearTimeout(validationTimers.get(key));
     validationTimers.set(key, setTimeout(() => {
       validationTimers.delete(key);
@@ -366,6 +407,22 @@ function activate(context) {
         output.appendLine(`Failed to validate ${key}: ${error.stack || error.message}`);
       });
     }, 500));
+  }
+
+  /** Refresh a changed shader and open shaders that include the changed URI. */
+  function refreshAffected(uri, changedDocument, closed = false) {
+    const key = uri.toString();
+    let affected = false;
+    for (const document of vscode.workspace.textDocuments) {
+      if (document.languageId !== "libretro-slang" || (closed && document === changedDocument)) continue;
+      const documentKey = document.uri.toString();
+      const known = dependencies.get(documentKey);
+      if (documentKey === key || pendingModels.has(documentKey) || !known || known.has(key)) {
+        schedule(document);
+        affected = true;
+      }
+    }
+    if (affected) semanticChanges.fire();
   }
 
   function refreshShaders() {
@@ -376,24 +433,25 @@ function activate(context) {
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument(document => {
       if (document.languageId === "libretro-slang-preset") schedule(document);
-      refreshShaders();
+      refreshAffected(document.uri, document);
     }),
     vscode.workspace.onDidChangeTextDocument(event => {
       if (event.document.languageId === "libretro-slang-preset") schedule(event.document);
-      refreshShaders();
+      refreshAffected(event.document.uri, event.document);
     }),
     vscode.workspace.onDidSaveTextDocument(document => {
       if (document.languageId === "libretro-slang-preset") schedule(document);
-      refreshShaders();
+      refreshAffected(document.uri, document);
     }),
     vscode.workspace.onDidCloseTextDocument(document => {
       const key = document.uri.toString();
       generations.set(key, (generations.get(key) || 0) + 1);
       dependencies.delete(key);
+      pendingModels.delete(key);
       clearTimeout(validationTimers.get(key));
       validationTimers.delete(key);
       diagnosticCollection.delete(document.uri);
-      refreshShaders();
+      refreshAffected(document.uri, document, true);
     }),
     vscode.workspace.onDidChangeConfiguration(event => {
       if (event.affectsConfiguration("libretro-slang")) {
@@ -404,7 +462,7 @@ function activate(context) {
   );
   const watcher = vscode.workspace.createFileSystemWatcher("**/*");
   const onFileChanged = uri => {
-    if ([...dependencies.values()].some(files => files.has(uri.toString()))) refreshShaders();
+    if (pendingModels.size || [...dependencies.values()].some(files => files.has(uri.toString()))) refreshAffected(uri);
   };
   context.subscriptions.push(watcher, watcher.onDidCreate(onFileChanged), watcher.onDidChange(onFileChanged), watcher.onDidDelete(onFileChanged));
   vscode.workspace.textDocuments.forEach(schedule);
@@ -431,15 +489,18 @@ function activate(context) {
   context.subscriptions.push(vscode.languages.registerDocumentLinkProvider(presetSelector, {
     provideDocumentLinks(document) {
       const links = [];
+      const assignments = [];
       for (let line = 0; line < document.lineCount; line++) {
-        const text = document.lineAt(line).text;
-        const match = text.match(/^\s*(shader\d+|[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]+)"/);
-        if (!match) continue;
-        const isTexture = !/^shader\d+$/.test(match[1]) && !text.toLowerCase().includes("shader");
-        const target = vscode.Uri.joinPath(vscode.Uri.joinPath(document.uri, ".."), match[2]);
-        const start = text.indexOf("\"" + match[2] + "\"");
+        const assignment = presetAssignment(document.lineAt(line).text, line);
+        if (assignment) assignments.push(assignment);
+      }
+      const textureNames = new Set(assignments.filter(item => item.key === "textures")
+        .flatMap(item => item.value.split(";").map(name => name.trim()).filter(Boolean)));
+      for (const assignment of assignments) {
+        if (!assignment.value || (!/^shader\d+$/.test(assignment.key) && !textureNames.has(assignment.key))) continue;
+        const target = resolveInclude(document.uri, assignment.value);
         links.push(new vscode.DocumentLink(
-          new vscode.Range(line, start + 1, line, start + 1 + match[2].length),
+          new vscode.Range(assignment.line, assignment.start, assignment.line, assignment.start + assignment.value.length),
           target
         ));
       }

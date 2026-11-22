@@ -29,12 +29,21 @@ const QUALIFIERS = new Set([
 ]);
 const BASIC_TYPES = /^(?:bool|int|uint|float|double|[biud]?vec[234]|d?mat[234](?:x[234])?|sampler\w+)$/;
 
+/**
+ * Look up the expected type of a recognized Libretro uniform name.
+ * @param {string} name Uniform name.
+ * @returns {string|null} GLSL type, or null for an unrecognized name.
+ */
 function builtinType(name) {
   if (Object.prototype.hasOwnProperty.call(BUILTIN_TYPES, name)) return BUILTIN_TYPES[name];
   if (/^(OriginalSize|SourceSize|OriginalHistorySize\d+|PassOutputSize\d+|PassFeedbackSize\d+)$/.test(name)) return "vec4";
   return null;
 }
 
+/**
+ * Tokenize expanded entries, retaining source locations, stage and conditional
+ * context. Preprocessor directives are not expanded or included as tokens.
+ */
 function tokensFor(model) {
   const tokens = [];
   let conditionalDepth = 0;
@@ -83,6 +92,10 @@ function locationOf(token) {
     rootLine: token.entry.rootLine, stage: token.entry.stage, conditional: token.conditional };
 }
 
+/**
+ * Parse a declaration into symbols with source locations and qualifiers.
+ * This recognizes common declarations, not the complete GLSL grammar.
+ */
 function declarations(tokens, kind, extra = {}, terminator) {
   let i = 0;
   let location = null;
@@ -126,6 +139,13 @@ function declarations(tokens, kind, extra = {}, terminator) {
   return result;
 }
 
+/**
+ * Index recognized declarations and tokens from an expanded include model.
+ * The token indexes preserve repeated inclusions; local symbols also carry
+ * declaration and scope indexes for shadowing-aware lookup.
+ * @param {object} model Expanded include model.
+ * @returns {object} Tokens, symbols, and lookup maps keyed by position and name.
+ */
 function buildSemanticModel(model) {
   const tokens = tokensFor(model);
   const symbols = [];
@@ -265,6 +285,10 @@ function sameStage(a, b) {
   return !a || !b || a === b;
 }
 
+/**
+ * Split a complete call's arguments at top-level commas.
+ * @returns {object[][]|null} Argument token lists, or null if the call is incomplete.
+ */
 function callArguments(tokens, open) {
   const end = matching(tokens, open, "(", ")");
   if (end < 0) return null;
@@ -272,6 +296,10 @@ function callArguments(tokens, open) {
   return args.length ? splitComma(args) : [];
 }
 
+/**
+ * Infer types only for supported literals and complete constructor expressions.
+ * @returns {string|null} GLSL type, or null when the expression is not obvious.
+ */
 function obviousType(tokens) {
   if (tokens.length === 1) {
     const value = tokens[0].value;
@@ -286,6 +314,15 @@ function obviousType(tokens) {
   return null;
 }
 
+/**
+ * Infer argument types for the call at a semantic token index. Simple expressions
+ * use scoped declaration lookup, including included files. Repeated inclusions
+ * must agree on each type; unsupported or ambiguous expressions remain unknown.
+ * @param {object} model Expanded include model.
+ * @param {object} semantic Semantic model for the same expanded source.
+ * @param {number} index Index of the call's function-name token.
+ * @returns {(string|null)[]|null} Types per argument, or null for an incomplete call.
+ */
 function callArgumentTypes(model, semantic, index) {
   const call = semantic.tokens[index];
   const key = `${call.entry.uri.toString()}:${call.entry.line}:${call.character}:${call.value}`;
@@ -368,6 +405,18 @@ function callArgumentTypes(model, semantic, index) {
   return typesByCall[0].map((type, i) => typesByCall.every(types => types[i] === type) ? type : null);
 }
 
+/**
+ * Resolve a name at a source location across stages, scopes and includes.
+ * Local declarations shadow globals; function matches can remain ambiguous, and
+ * interface declarations may include their opposite-stage location counterpart.
+ * @param {object} model Expanded include model.
+ * @param {object} semantic Semantic model for the same expanded source.
+ * @param {object} uri Source URI.
+ * @param {number} line Zero-based source line.
+ * @param {number} character Zero-based character offset.
+ * @param {string} name Identifier at the position.
+ * @returns {{parameters: object[], symbols: object[]}} Matching declarations.
+ */
 function resolveAt(model, semantic, uri, line, character, name) {
   const tokens = semantic.tokens;
   const indexes = semantic.tokenIndexes.get(`${uri.toString()}:${line}:${character}:${name}`) || [];
@@ -438,6 +487,11 @@ function resolveAt(model, semantic, uri, line, character, name) {
   return { parameters: isCall || localMatch || (isMember && !matchedMember) ? [] : parameters, symbols: [...unique.values()] };
 }
 
+/**
+ * Find recognized uniform and stage-interface type mismatches. Conditional
+ * declarations and cases outside the supported subset are excluded.
+ * @returns {object[]} Source-backed issues with a message.
+ */
 function semanticIssues(model, semantic) {
   const issues = [];
   const parameterNames = new Set(model.parameters.map(parameter => parameter.name));
@@ -466,6 +520,12 @@ function semanticIssues(model, semantic) {
   return issues;
 }
 
+/**
+ * Check for apparent missing stage outputs, assignments and matching interfaces.
+ * These are conservative syntactic checks, not control-flow analysis; unresolved
+ * includes and preprocessor constructs can make the relevant checks inapplicable.
+ * @returns {object[]} Source-backed issues with a message.
+ */
 function outputIssues(model, semantic) {
   const issues = [];
   if (model.issues.length || model.missingOptional) return issues;
