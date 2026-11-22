@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Libretro Slang Preset",
+  "scopeName": "source.libretro-slang-preset",
+  "patterns": [
+    {"include": "#comments"},
+    {"include": "#assignment"}
+  ],
+  "repository": {
+    "comments": {"patterns":[{"name":"comment.line.number-sign.libretro-slang-preset","match":"#.*$"}]},
+    "assignment": {
+      "patterns": [
+        {"name":"meta.assignment.libretro-slang-preset","match":"^\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(=)","captures":{"1":{"name":"variable.other.libretro-slang-preset"},"2":{"name":"punctuation.separator.key-value.libretro-slang-preset"}}},
+        {"name":"constant.language.boolean.libretro-slang-preset","match":"\\b(true|false)\\b"},
+        {"name":"constant.language.wrap-mode.libretro-slang-preset","match":"\\b(clamp_to_edge|clamp_to_border|repeat|mirrored_repeat)\\b"},
+        {"name":"constant.language.scale-type.libretro-slang-preset","match":"\\b(source|viewport|absolute)\\b"},
+        {"name":"constant.numeric.libretro-slang-preset","match":"(?<![A-Za-z0-9_.])[-+]?(?:\\d+\\.\\d*|\\.\\d+|\\d+)(?:[eE][+-]?\\d+)?(?![A-Za-z0-9_])"},
+        {"name":"string.quoted.double.libretro-slang-preset","match":"\"(?:\\\\.|[^\"\\\\])*\""}
+      ]
+    }
+  }
+}

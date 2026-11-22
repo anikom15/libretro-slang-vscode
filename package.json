@@ -1,0 +1,93 @@
+{
+  "name": "libretro-slang",
+  "displayName": "Libretro Slang",
+  "description": "Syntax highlighting and language support for Libretro .slang shaders and .slangp presets",
+  "version": "0.1.0",
+  "publisher": "ScanlineClassic",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:libretro-slang",
+    "onLanguage:libretro-slang-preset"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "semanticTokenScopes": [
+      {
+        "language": "libretro-slang",
+        "scopes": {
+          "parameter": ["variable.parameter.glsl"],
+          "function": ["entity.name.function.glsl"],
+          "property": ["variable.other.member.glsl"],
+          "variable": ["variable.other.glsl"],
+          "struct": ["entity.name.type.struct.glsl"]
+        }
+      }
+    ],
+    "languages": [
+      {
+        "id": "libretro-slang",
+        "aliases": [
+          "Libretro Slang",
+          "Slang"
+        ],
+        "extensions": [
+          ".slang",
+          ".inc"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "libretro-slang-preset",
+        "aliases": [
+          "Libretro Slang Preset",
+          "Slang Preset"
+        ],
+        "extensions": [
+          ".slangp"
+        ],
+        "configuration": "./language-configuration-preset.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "libretro-slang",
+        "scopeName": "source.glsl.libretro-slang",
+        "path": "./syntaxes/libretro-slang.tmLanguage.json"
+      },
+      {
+        "language": "libretro-slang-preset",
+        "scopeName": "source.libretro-slang-preset",
+        "path": "./syntaxes/libretro-slang-preset.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Libretro Slang",
+      "properties": {
+        "libretro-slang.validateStructure": {
+          "type": "boolean",
+          "default": true,
+          "description": "Validate shader structure, includes, and recognized semantic type mismatches"
+        },
+        "libretro-slang.validateGlsl": {
+          "type": "boolean",
+          "default": true,
+          "description": "Validate standalone shaders with glslangValidator, including GLSL built-in calls."
+        },
+        "libretro-slang.glslangValidatorPath": {
+          "type": "string",
+          "default": "glslangValidator",
+          "scope": "machine",
+          "description": "Path to the installed glslangValidator executable."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node ./test/extension.test.js"
+  }
+}

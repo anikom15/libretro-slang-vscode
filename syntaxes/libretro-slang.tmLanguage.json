@@ -1,0 +1,74 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Libretro Slang",
+  "scopeName": "source.glsl.libretro-slang",
+  "patterns": [
+    {"include": "#comments"},
+    {"include": "#preprocessor"},
+    {"include": "#slang-pragmas"},
+    {"include": "#layout"},
+    {"include": "#types"},
+    {"include": "#builtins"},
+    {"include": "#keywords"},
+    {"include": "#numbers"},
+    {"include": "#strings"}
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {"name": "comment.line.double-slash.glsl", "match": "//.*$"},
+        {"name": "comment.block.glsl", "begin": "/\\*", "end": "\\*/"}
+      ]
+    },
+    "preprocessor": {
+      "patterns": [
+        {"name": "meta.preprocessor.glsl", "match": "^\\s*#\\s*(define|undef|if|ifdef|ifndef|else|elif|endif|extension|version|line|error)\\b"},
+        {"name": "constant.other.version.glsl", "match": "(?<=#version\\s)\\d+(?:\\s+es)?"},
+        {"name": "keyword.control.import.glsl", "match": "^\\s*#\\s*include(?:_optional)?\\b"}
+      ]
+    },
+    "slang-pragmas": {
+      "patterns": [
+        {"name": "meta.slang.pragma.stage", "match": "^\\s*(#\\s*pragma\\s+(?:stage))\\s+(vertex|fragment)\\b", "captures": {"1":{"name":"keyword.control.directive.libretro-slang"},"2":{"name":"storage.modifier.stage.libretro-slang"}}},
+        {"name": "meta.slang.pragma.parameter", "begin": "^\\s*(#\\s*pragma\\s+parameter)\\s+([A-Za-z_]\\w*)", "beginCaptures": {"1":{"name":"keyword.control.directive.libretro-slang"},"2":{"name":"variable.parameter.libretro-slang"}}, "end": "$", "patterns": [{"include":"#comments"},{"include":"#strings"},{"include":"#numbers"}]},
+        {"name": "meta.slang.pragma.format", "match": "^\\s*(#\\s*pragma\\s+format)\\s+(R8(?:G8(?:B8A8)?)?_(?:UNORM|UINT|SINT)|R8G8B8A8_SRGB|A2B10G10R10_(?:UNORM|UINT)_PACK32|R16(?:G16(?:B16A16)?)?_(?:UINT|SINT|SFLOAT)|R32(?:G32(?:B32A32)?)?_(?:UINT|SINT|SFLOAT))\\b", "captures": {"1":{"name":"keyword.control.directive.libretro-slang"},"2":{"name":"constant.language.format.libretro-slang"}}},
+        {"name": "meta.slang.pragma.include", "match": "^\\s*(#\\s*pragma\\s+(?:include|include_optional))\\s*(\"[^\"]*\")", "captures": {"1":{"name":"keyword.control.directive.libretro-slang"},"2":{"name":"string.quoted.double.path.libretro-slang"}}},
+        {"name": "meta.slang.pragma", "match": "^\\s*(#\\s*pragma\\s+(?:name|alias|format|binding|parameter|stage|include|include_optional))\\b", "captures": {"1":{"name":"keyword.control.directive.libretro-slang"}}}
+      ]
+    },
+    "layout": {
+      "patterns": [
+        {"name": "meta.layout.glsl", "begin": "\\b(layout)\\s*\\(", "beginCaptures": {"1":{"name":"storage.modifier.glsl"}}, "end": "\\)", "patterns": [
+          {"name":"support.constant.layout.glsl","match":"\\b(location|component|index|binding|set|offset|align|push_constant|std140|std430|shared|packed|row_major|column_major|input_attachment_index)\\b"},
+          {"include":"#numbers"},
+          {"include":"#comments"}
+        ]}
+      ]
+    },
+    "types": {
+      "patterns": [
+        {"match":"\\b(struct)\\s+([A-Za-z_]\\w*)(?=\\s*\\{)","captures":{"1":{"name":"storage.type.struct.glsl"},"2":{"name":"entity.name.type.struct.glsl"}}},
+        {"name":"storage.type.struct.glsl","match":"\\bstruct\\b"},
+        {"name": "support.type.built-in.glsl", "match": "\\b(void|bool|bvec2|bvec3|bvec4|int|uint|ivec2|ivec3|ivec4|uvec2|uvec3|uvec4|float|double|vec2|vec3|vec4|dvec2|dvec3|dvec4|mat2|mat3|mat4|mat2x2|mat2x3|mat2x4|mat3x2|mat3x3|mat3x4|mat4x2|mat4x3|mat4x4|sampler2D|sampler3D|samplerCube)\\b"}
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {"name": "variable.language.libretro-slang", "match": "\\b(MVP|SourceSize|OutputSize|FinalViewportSize|OriginalSize|FrameCount|FrameDirection|Rotation|OriginalAspect|OriginalAspectRotated|OriginalFPS|FrameTimeDelta|Original|Source|PassOutput\\d+|PassFeedback\\d+|OriginalHistory\\d+|User\\d+|PassOutputSize\\d+|PassFeedbackSize\\d+|OriginalHistorySize\\d+|UserSize\\d+)\\b"},
+        {"name":"support.function.builtin.glsl","match":"\\b(radians|degrees|sin|cos|tan|asin|acos|atan|sinh|cosh|tanh|asinh|acosh|atanh|pow|exp|log|exp2|log2|sqrt|inversesqrt|abs|sign|floor|trunc|round|roundEven|ceil|fract|mod|modf|min|max|clamp|mix|step|smoothstep|isnan|isinf|floatBitsToInt|floatBitsToUint|intBitsToFloat|uintBitsToFloat|fma|frexp|ldexp|length|distance|dot|cross|normalize|faceforward|reflect|refract|matrixCompMult|outerProduct|transpose|determinant|inverse|lessThan|lessThanEqual|greaterThan|greaterThanEqual|equal|notEqual|any|all|not|texture|textureProj|textureLod|textureOffset|texelFetch|texelFetchOffset|textureProjOffset|textureLodOffset|textureProjLod|textureProjLodOffset|textureGrad|textureGradOffset|textureProjGrad|textureProjGradOffset|textureSize|textureQueryLod|textureQueryLevels|textureGather|textureGatherOffset|textureGatherOffsets|dFdx|dFdy|fwidth|dFdxFine|dFdyFine|fwidthFine|dFdxCoarse|dFdyCoarse|fwidthCoarse)\\b(?=\\s*\\()"},
+        {"name": "variable.language.glsl", "match": "\\b(gl_Position|gl_FragCoord|gl_FragDepth|gl_GlobalInvocationID|gl_LocalInvocationID|gl_WorkGroupID|gl_VertexIndex|gl_InstanceIndex)\\b"}
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {"name": "keyword.control.glsl", "match": "\\b(if|else|for|while|do|switch|case|default|break|continue|return|discard)\\b"},
+        {"name": "storage.modifier.glsl", "match": "\\b(uniform|in|out|inout|const|flat|smooth|noperspective|centroid|sample|shared|coherent|volatile|restrict|readonly|writeonly|precision|highp|mediump|lowp|invariant|precise|push_constant|set|binding)\\b"}
+      ]
+    },
+    "numbers": {"patterns":[
+      {"name":"constant.language.boolean.glsl","match":"\\b(?:true|false)\\b"},
+      {"name":"constant.numeric.glsl","match":"(?<![A-Za-z0-9_.])(?:0[xX][0-9A-Fa-f]+[uU]?|(?:\\d+\\.\\d*|\\.\\d+|\\d+)(?:[eE][+-]?\\d+)?[uUfF]?)(?![A-Za-z0-9_])"}
+    ]},
+    "strings": {"patterns":[{"name":"string.quoted.double.glsl","match":"\"(?:\\\\.|[^\"\\\\])*\""}]}
+  }
+}
