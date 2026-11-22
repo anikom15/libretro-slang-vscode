@@ -2,7 +2,7 @@
   "name": "libretro-slang",
   "displayName": "Libretro Slang",
   "description": "Syntax highlighting and language support for Libretro .slang shaders and .slangp presets",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "ScanlineClassic",
   "license": "GPL-3.0-or-later",
   "repository": {
@@ -10,7 +10,7 @@
     "url": "https://github.com/anikom15/libretro-slang-vscode.git"
   },
   "engines": {
-    "vscode": "^4.1.0"
+    "vscode": "^1.85.0"
   },
   "categories": [
     "Programming Languages"
